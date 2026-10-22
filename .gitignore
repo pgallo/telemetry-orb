@@ -1,0 +1,11 @@
+build/
+build-*/
+cmake-build-*/
+Testing/
+*.ior
+*.ior.tmp
+*.o
+*.a
+*.so
+compile_commands.json
+.cache/

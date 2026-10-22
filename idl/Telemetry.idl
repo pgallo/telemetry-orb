@@ -1,0 +1,102 @@
+// Real-time patient telemonitoring contract.
+//
+// Producers (bedside gateways) register beds and publish batches of vital
+// sign samples to a Hub. Central stations implement Subscriber and receive
+// matching samples by push, under a lease they must keep renewing.
+
+#ifndef TELEMETRY_IDL
+#define TELEMETRY_IDL
+
+module Telemetry {
+
+  // Nanoseconds since the Unix epoch, taken from the producer's wall clock.
+  typedef unsigned long long TimeNs;
+  typedef unsigned long long SubscriptionId;
+  typedef string BedId;
+  typedef sequence<string> StringSeq;
+
+  enum SampleQuality { VALID, QUESTIONABLE, INVALID };
+
+  struct VitalSample {
+    BedId              bed;
+    string             parameter;   // HR, SPO2, RR, NIBPS, NIBPD, TEMP
+    double             value;
+    string             units;       // UCUM
+    SampleQuality      quality;
+    TimeNs             sourceTime;  // when the producer sampled the value
+    unsigned long      seq;         // per-bed sequence, increments per sample
+  };
+  typedef sequence<VitalSample> SampleBatch;
+
+  struct BedInfo {
+    BedId  bed;
+    string ward;
+    string label;
+  };
+  typedef sequence<BedInfo> BedInfoSeq;
+
+  // Empty lists match everything. Entries may end in '*' for a prefix match.
+  struct Filter {
+    StringSeq beds;
+    StringSeq parameters;
+  };
+
+  struct DeliveryQoS {
+    unsigned long maxQueue;       // samples buffered at the hub; oldest dropped on overflow
+    unsigned long maxBatch;       // upper bound on samples per push
+    unsigned long maxLatencyMs;   // flush a partial batch once its oldest sample is this old
+    unsigned long minIntervalMs;  // rate cap: at most one push per interval (0 = none)
+    unsigned long leaseMs;        // requested lease; the hub may shorten it
+  };
+
+  struct Subscription {
+    SubscriptionId id;
+    unsigned long  leaseMs;       // lease actually granted
+  };
+
+  struct DeliveryStats {
+    unsigned long long delivered;
+    unsigned long long dropped;
+    unsigned long      queued;
+    unsigned long      consecutiveFailures;
+    double             queueLatencyP50Ms;
+    double             queueLatencyP99Ms;
+    double             queueLatencyMaxMs;
+  };
+
+  exception UnknownBed          { BedId bed; };
+  exception InvalidFilter       { string reason; };
+  exception InvalidQoS          { string reason; };
+  exception UnknownSubscription { SubscriptionId id; };
+
+  // Implemented by each central station. Delivery is oneway: the hub never
+  // waits for a station to process a batch. droppedSinceLast tells the
+  // station how many samples the hub discarded for it since the last push.
+  interface Subscriber {
+    oneway void push(in SampleBatch batch, in unsigned long droppedSinceLast);
+  };
+
+  interface TelemetrySource {
+    void registerBed(in BedInfo info);
+    void unregisterBed(in BedId bed) raises (UnknownBed);
+    // Twoway on purpose: the producer gets back-pressure and learns about
+    // beds the hub has forgotten (e.g. after a hub restart).
+    void publish(in SampleBatch batch) raises (UnknownBed);
+  };
+
+  interface Hub {
+    Subscription subscribe(in Subscriber cb, in string clientName,
+                           in Filter f, in DeliveryQoS qos)
+      raises (InvalidFilter, InvalidQoS);
+    // Returns the lease granted from now. Raises UnknownSubscription once the
+    // lease has expired or the subscriber was evicted; the client then
+    // subscribes again.
+    unsigned long renew(in SubscriptionId id) raises (UnknownSubscription);
+    void unsubscribe(in SubscriptionId id) raises (UnknownSubscription);
+    DeliveryStats stats(in SubscriptionId id) raises (UnknownSubscription);
+    BedInfoSeq listBeds();
+    TelemetrySource source();
+  };
+};
+
+#endif
